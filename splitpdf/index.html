@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="th">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Splitter - Perfect Page Split</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-slate-100 p-6 md:p-10 font-sans">
+    <div id="app" class="max-w-4xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl font-extrabold text-slate-800">PDF Bookmark Splitter</h1>
+        </header>
+
+        <div @dragover.prevent="isDragging = true" @dragleave.prevent="isDragging = false" @drop.prevent="handleDrop"
+            @click="$refs.fileInput.click()"
+            :class="['border-4 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all bg-white shadow-sm', isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-300 hover:border-blue-400']">
+            <input type="file" ref="fileInput" class="hidden" accept="application/pdf" @change="handleFileSelect">
+            <div v-if="!file" class="text-slate-500">
+                <div class="text-4xl mb-2">📥</div>
+                <p>ลากไฟล์ PDF มาวางที่นี่</p>
+            </div>
+            <div v-else class="text-blue-600 font-bold">
+                ✅ {{ file.name }}
+            </div>
+        </div>
+
+        <div v-if="bookmarks.length > 0" class="mt-6 space-y-4">
+            <div class="bg-white p-5 rounded-xl shadow-sm border flex items-center justify-between">
+                <div>
+                    <label class="font-bold text-slate-700 mr-2">เลือก Level ที่ต้องการแยก:</label>
+                    <select v-model.number="selectedLevel" class="border rounded-lg px-4 py-1">
+                        <option v-for="level in maxLevel" :key="level" :value="level">Level {{ level }}</option>
+                    </select>
+                </div>
+                <button @click="downloadAsZip" :disabled="isProcessing"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-xl font-bold disabled:opacity-50 transition-all">
+                    {{ isProcessing ? 'กำลังประมวลผล...' : '🎁 ดาวน์โหลดเป็น ZIP' }}
+                </button>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+                <table class="w-full text-left border-collapse">
+                    <thead class="bg-slate-50 text-slate-600 text-xs">
+                        <tr>
+                            <th class="p-4">ลำดับ_ชื่อไฟล์</th>
+                            <th class="p-4">ช่วงหน้าในต้นฉบับ</th>
+                            <th class="p-4 text-right">แอคชั่น</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y">
+                        <tr v-for="section in filteredSections" :key="section.prefix">
+                            <td class="p-4 text-sm font-medium">
+                                <span class="text-blue-500">{{ section.prefix }}_</span>{{ section.title }}.pdf
+                            </td>
+                            <td class="p-4 text-xs text-slate-500">
+                                หน้า {{ section.startPage + 1 }} ถึง {{ section.endPage }}
+                                <span class="ml-1 text-slate-300">({{ section.endPage - section.startPage }}
+                                    หน้า)</span>
+                            </td>
+                            <td class="p-4 text-right">
+                                <button @click="downloadSingle(section)"
+                                    class="text-blue-600 hover:underline text-sm font-semibold">โหลด</button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed } = Vue;
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        createApp({
+            setup() {
+                const file = ref(null);
+                const isDragging = ref(false);
+                const bookmarks = ref([]);
+                const selectedLevel = ref(1);
+                const fileArrayBuffer = ref(null);
+                const totalPages = ref(0);
+                const isProcessing = ref(false);
+
+                const processFile = async (f) => {
+                    if (!f) return;
+                    file.value = f;
+                    fileArrayBuffer.value = await f.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument({ data: fileArrayBuffer.value.slice(0) }).promise;
+                    totalPages.value = pdf.numPages;
+                    const outline = await pdf.getOutline();
+
+                    const flat = [];
+                    const traverse = (items, level = 1) => {
+                        items.forEach(item => {
+                            flat.push({ title: item.title, dest: item.dest, level: level });
+                            if (item.items?.length > 0) traverse(item.items, level + 1);
+                        });
+                    };
+                    if (outline) traverse(outline);
+
+                    const withPages = await Promise.all(flat.map(async (bm) => {
+                        let pageNum = 0;
+                        try {
+                            const dest = typeof bm.dest === 'string' ? await pdf.getDestination(bm.dest) : bm.dest;
+                            pageNum = await pdf.getPageIndex(dest[0]);
+                        } catch (e) { pageNum = 0; }
+                        return { ...bm, startPage: pageNum };
+                    }));
+                    bookmarks.value = withPages;
+                };
+
+                const handleFileSelect = (e) => processFile(e.target.files[0]);
+                const handleDrop = (e) => { isDragging.value = false; processFile(e.dataTransfer.files[0]); };
+
+                const filteredSections = computed(() => {
+                    const currentItems = bookmarks.value.filter(b => b.level === selectedLevel.value);
+                    const pad = String(currentItems.length).length >= 2 ? String(currentItems.length).length : 2;
+
+                    return currentItems.map((bm, idx) => {
+                        // ค้นหาตำแหน่งของ bookmark นี้ในรายการ "ทั้งหมด"
+                        const currentIndexInAll = bookmarks.value.findIndex(b => b === bm);
+
+                        // ค้นหาขอบเขตถัดไป (Bookmark ถัดไปที่มี level เท่ากันหรือสูงกว่า)
+                        const nextBoundary = bookmarks.value.slice(currentIndexInAll + 1)
+                            .find(b => b.level <= bm.level && b.startPage > bm.startPage);
+
+                        const endPage = nextBoundary ? nextBoundary.startPage : totalPages.value;
+                        const prefix = String(idx + 1).padStart(pad, '0');
+                        const cleanTitle = bm.title.replace(/[/\\?%*:|"<>]/g, '-');
+
+                        return {
+                            prefix, title: cleanTitle,
+                            fullFileName: `${prefix}_${cleanTitle}.pdf`,
+                            startPage: bm.startPage, endPage
+                        };
+                    });
+                });
+
+                const createPdfBlob = async (srcDoc, section) => {
+                    const newDoc = await PDFLib.PDFDocument.create();
+                    // หน้าที่ต้องการ copy คือตั้งแต่ startPage ถึง endPage-1
+                    const pagesToCopy = Array.from({ length: section.endPage - section.startPage }, (_, i) => section.startPage + i);
+                    const copiedPages = await newDoc.copyPages(srcDoc, pagesToCopy);
+                    copiedPages.forEach(p => newDoc.addPage(p));
+                    return await newDoc.save();
+                };
+
+                const downloadSingle = async (section) => {
+                    const srcDoc = await PDFLib.PDFDocument.load(fileArrayBuffer.value.slice(0));
+                    const bytes = await createPdfBlob(srcDoc, section);
+                    saveAs(new Blob([bytes]), section.fullFileName);
+                };
+
+                const downloadAsZip = async () => {
+                    isProcessing.value = true;
+                    try {
+                        const zip = new JSZip();
+                        const srcDoc = await PDFLib.PDFDocument.load(fileArrayBuffer.value.slice(0));
+                        for (const s of filteredSections.value) {
+                            const b = await createPdfBlob(srcDoc, s);
+                            zip.file(s.fullFileName, b);
+                        }
+                        const content = await zip.generateAsync({ type: "blob" });
+                        saveAs(content, `${file.value.name.split('.')[0]}_split.zip`);
+                    } catch (e) { alert(e.message); }
+                    isProcessing.value = false;
+                };
+
+                const saveAs = (blob, name) => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = name; a.click();
+                    URL.revokeObjectURL(url);
+                };
+
+                return {
+                    file, isDragging, bookmarks, selectedLevel,
+                    maxLevel: computed(() => Math.max(...bookmarks.value.map(b => b.level), 1)),
+                    filteredSections, isProcessing, handleFileSelect, handleDrop, downloadSingle, downloadAsZip
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>
